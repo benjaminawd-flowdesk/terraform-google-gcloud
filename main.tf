@@ -36,7 +36,7 @@ locals {
   wait = length(null_resource.additional_components[*].triggers) + length(
     null_resource.gcloud_auth_service_account_key_file[*].triggers,
     ) + length(null_resource.gcloud_auth_google_credentials[*].triggers,
-  ) + length(null_resource.run_command[*].triggers) + length(null_resource.run_destroy_command[*].triggers)
+  ) + length(terraform_data.run_command[*].triggers_replace) + length(terraform_data.run_destroy_command[*].triggers_replace)
 
   prepare_cache_command                        = "mkdir -p ${local.cache_path}"
   download_gcloud_command                      = "curl -sL -o ${local.cache_path}/google-cloud-sdk.tar.gz ${local.gcloud_download_url}"
@@ -210,37 +210,34 @@ resource "null_resource" "gcloud_auth_google_credentials" {
   }
 }
 
-resource "null_resource" "run_command" {
+resource "terraform_data" "run_command" {
   count = var.enabled ? 1 : 0
 
-  depends_on = [
-    null_resource.module_depends_on,
-    null_resource.decompress,
-    null_resource.additional_components,
-    null_resource.gcloud_auth_google_credentials,
-    null_resource.gcloud_auth_service_account_key_file
-  ]
-
-  triggers = merge({
+  input = {
     md5                   = md5(var.create_cmd_entrypoint)
     arguments             = md5(var.create_cmd_body)
     create_cmd_entrypoint = var.create_cmd_entrypoint
     create_cmd_body       = var.create_cmd_body
     gcloud_bin_abs_path   = local.gcloud_bin_abs_path
-  }, var.create_cmd_triggers)
-
-  provisioner "local-exec" {
-    when    = create
-    command = <<-EOT
-    PATH=${self.triggers.gcloud_bin_abs_path}:$PATH
-    ${self.triggers.create_cmd_entrypoint} ${self.triggers.create_cmd_body}
-    EOT
   }
 
-}
+  triggers_replace = merge(
+    {
+      md5                   = md5(var.create_cmd_entrypoint)
+      arguments             = md5(var.create_cmd_body)
+      create_cmd_entrypoint = var.create_cmd_entrypoint
+      create_cmd_body       = var.create_cmd_body
+    },
+    var.ignore_gcloud_path_changes ? {} : { gcloud_bin_abs_path = local.gcloud_bin_abs_path },
+    var.create_cmd_triggers
+  )
 
-resource "null_resource" "run_destroy_command" {
-  count = var.enabled ? 1 : 0
+  provisioner "local-exec" {
+    command = <<-EOT
+    PATH=${self.input.gcloud_bin_abs_path}:$PATH
+    ${self.input.create_cmd_entrypoint} ${self.input.create_cmd_body}
+    EOT
+  }
 
   depends_on = [
     null_resource.module_depends_on,
@@ -249,27 +246,50 @@ resource "null_resource" "run_destroy_command" {
     null_resource.gcloud_auth_google_credentials,
     null_resource.gcloud_auth_service_account_key_file
   ]
+}
 
-  triggers = merge({
+resource "terraform_data" "run_destroy_command" {
+  count = var.enabled ? 1 : 0
+
+  input = {
     destroy_cmd_entrypoint = var.destroy_cmd_entrypoint
     destroy_cmd_body       = var.destroy_cmd_body
     gcloud_bin_abs_path    = local.gcloud_bin_abs_path
-  }, var.create_cmd_triggers)
+  }
+
+  triggers_replace = merge({
+    destroy_cmd_entrypoint = var.destroy_cmd_entrypoint
+    destroy_cmd_body       = var.destroy_cmd_body
+  },
+  var.ignore_gcloud_path_changes ? {} : { gcloud_bin_abs_path = local.gcloud_bin_abs_path },
+  var.create_cmd_triggers)
+
+  lifecycle {
+    create_before_destroy = true
+  }
 
   provisioner "local-exec" {
     when    = destroy
     command = <<-EOT
-    PATH=${self.triggers.gcloud_bin_abs_path}:$PATH
-    ${self.triggers.destroy_cmd_entrypoint} ${self.triggers.destroy_cmd_body}
+    PATH=${self.input.gcloud_bin_abs_path}:$PATH
+    ${self.input.destroy_cmd_entrypoint} ${self.input.destroy_cmd_body}
     EOT
   }
+
+  depends_on = [
+    null_resource.module_depends_on,
+    null_resource.decompress,
+    null_resource.additional_components,
+    null_resource.gcloud_auth_google_credentials,
+    null_resource.gcloud_auth_service_account_key_file
+  ]
 }
 
 // Destroy provision steps in opposite dependency order
 // so they run before `run_destroy_command` destroy
 resource "null_resource" "gcloud_auth_google_credentials_destroy" {
   count      = var.enabled && var.use_tf_google_credentials_env_var ? 1 : 0
-  depends_on = [null_resource.run_destroy_command]
+  depends_on = [terraform_data.run_destroy_command]
 
   triggers = {
     gcloud_auth_google_credentials_command = local.gcloud_auth_google_credentials_command
@@ -282,7 +302,7 @@ resource "null_resource" "gcloud_auth_google_credentials_destroy" {
 
 resource "null_resource" "gcloud_auth_service_account_key_file_destroy" {
   count      = var.enabled && length(var.service_account_key_file) > 0 ? 1 : 0
-  depends_on = [null_resource.run_destroy_command]
+  depends_on = [terraform_data.run_destroy_command]
 
   triggers = {
     gcloud_auth_service_account_key_file_command = local.gcloud_auth_service_account_key_file_command
@@ -296,7 +316,7 @@ resource "null_resource" "gcloud_auth_service_account_key_file_destroy" {
 
 resource "null_resource" "additional_components_destroy" {
   count      = var.enabled && length(var.additional_components) > 0 ? 1 : 0
-  depends_on = [null_resource.run_destroy_command]
+  depends_on = [terraform_data.run_destroy_command]
 
   triggers = {
     additional_components_command = local.additional_components_command
