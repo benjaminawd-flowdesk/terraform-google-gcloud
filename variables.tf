@@ -121,3 +121,9 @@ variable "jq_download_url" {
   type        = string
   default     = ""
 }
+
+variable "ignore_gcloud_path_changes" {
+  description = "Whether to ignore changes to the gcloud binary path. Useful for ephemeral runners."
+  type        = bool
+  default     = false
+}
